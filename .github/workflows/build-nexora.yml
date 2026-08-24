@@ -1,1 +1,737 @@
+name: Build Nexora OS ISO
 
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── 1. Checkout repo ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Install Arch Linux container (archiso needs Arch) ──────────────
+      - name: Set up Arch Linux via Docker
+        run: |
+          docker pull archlinux:latest
+          docker run --privileged --name nexora-builder \
+            -v ${{ github.workspace }}:/workspace \
+            -d archlinux:latest sleep infinity
+
+      # ── 3. Install archiso and dependencies inside Arch container ─────────
+      - name: Install build dependencies
+        run: |
+          docker exec nexora-builder bash -c "
+            pacman -Syu --noconfirm
+            pacman -S --noconfirm archiso git squashfs-tools libisoburn dosfstools
+          "
+
+      # ── 4. Run the Nexora build script inside the container ───────────────
+      - name: Build Nexora OS ISO
+        run: |
+          docker exec nexora-builder bash -c "
+            set -euo pipefail
+
+            BUILD_DIR='/var/tmp/nexora_build'
+            PROFILE_DIR='\${BUILD_DIR}/nexora_profile'
+            OUT_DIR='/workspace/output'
+
+            mkdir -p \"\${BUILD_DIR}\" \"\${OUT_DIR}\"
+
+            # ── Copy releng base profile ──────────────────────────────────
+            cp -r /usr/share/archiso/configs/releng/* \"\${PROFILE_DIR}/\"
+
+            # ── profiledef.sh ─────────────────────────────────────────────
+            cat > \"\${PROFILE_DIR}/profiledef.sh\" << 'PROFILEEOF'
+#!/usr/bin/env bash
+# shellcheck disable=SC2034
+iso_name=\"nexora-os\"
+iso_label=\"NEXORA_LIVE\"
+iso_publisher=\"Nexora OS Project <https://github.com/nexora-os>\"
+iso_application=\"Nexora Gaming and Unified OS\"
+iso_version=\"\$(date +%Y.%m.%d)\"
+install_dir=\"nexora\"
+buildmodes=('iso')
+bootmodes=('bios.syslinux.mbr' 'bios.syslinux.eltorito' 'uefi-ia32.systemd-boot.esp' 'uefi-x64.systemd-boot.esp')
+arch=\"x86_64\"
+pacman_conf=\"pacman.conf\"
+airootfs_image_type=\"squashfs\"
+airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
+file_permissions=(
+  [\"/etc/shadow\"]=\"0:0:400\"
+  [\"/root\"]=\"0:0:750\"
+  [\"/usr/local/bin/nexora-exe-handler\"]=\"0:0:755\"
+  [\"/usr/local/bin/nexora-sysinfo\"]=\"0:0:755\"
+  [\"/usr/local/bin/nexora-gamelauncher\"]=\"0:0:755\"
+  [\"/usr/local/bin/nexora-store\"]=\"0:0:755\"
+  [\"/usr/local/bin/nexora-installer\"]=\"0:0:755\"
+)
+PROFILEEOF
+            chmod +x \"\${PROFILE_DIR}/profiledef.sh\"
+
+            # ── pacman.conf: enable multilib ──────────────────────────────
+            cat >> \"\${PROFILE_DIR}/pacman.conf\" << 'PACEOF'
+[multilib]
+Include = /etc/pacman.d/mirrorlist
+PACEOF
+
+            # ── packages.x86_64 ───────────────────────────────────────────
+            cat > \"\${PROFILE_DIR}/packages.x86_64\" << 'PKGEOF'
+# Base system
+base
+linux
+linux-firmware
+linux-headers
+mkinitcpio
+mkinitcpio-archiso
+syslinux
+
+# Network
+networkmanager
+network-manager-applet
+wpa_supplicant
+wireless_tools
+iwd
+dhcpcd
+net-tools
+openssh
+
+# Audio (Pipewire full stack)
+pipewire
+pipewire-alsa
+pipewire-pulse
+pipewire-jack
+wireplumber
+pavucontrol
+alsa-utils
+
+# KDE Plasma Desktop
+plasma-desktop
+plasma-pa
+plasma-nm
+plasma-systemmonitor
+sddm
+sddm-kcm
+konsole
+dolphin
+kate
+ark
+spectacle
+okular
+gwenview
+kscreen
+kinfocenter
+partitionmanager
+kcalc
+kdeconnect
+
+# Wayland
+wayland
+wayland-protocols
+egl-wayland
+xorg-xwayland
+qt5-wayland
+qt6-wayland
+
+# GPU Drivers (universal)
+mesa
+lib32-mesa
+vulkan-icd-loader
+lib32-vulkan-icd-loader
+vulkan-radeon
+lib32-vulkan-radeon
+vulkan-intel
+lib32-vulkan-intel
+nvidia-utils
+lib32-nvidia-utils
+vulkan-tools
+mesa-utils
+xf86-video-amdgpu
+xf86-video-intel
+xf86-video-nouveau
+
+# Wine (Windows app/game compatibility)
+wine-staging
+winetricks
+wine-mono
+wine-gecko
+giflib
+lib32-giflib
+gnutls
+lib32-gnutls
+v4l-utils
+lib32-v4l-utils
+libpulse
+lib32-libpulse
+alsa-plugins
+lib32-alsa-plugins
+alsa-lib
+lib32-alsa-lib
+libjpeg-turbo
+lib32-libjpeg-turbo
+libxcomposite
+lib32-libxcomposite
+libxinerama
+lib32-libxinerama
+opencl-icd-loader
+lib32-opencl-icd-loader
+libxslt
+lib32-libxslt
+libva
+lib32-libva
+gtk3
+lib32-gtk3
+gst-plugins-base-libs
+lib32-gst-plugins-base-libs
+vulkan-icd-loader
+lib32-vulkan-icd-loader
+sdl2
+lib32-sdl2
+vkd3d
+lib32-vkd3d
+dxvk-mingw-w64
+
+# Proton/Steam (gaming)
+steam
+gamemode
+lib32-gamemode
+mangohud
+lib32-mangohud
+gamescope
+
+# Android (Waydroid)
+waydroid
+lxc
+dnsmasq
+fuse3
+nftables
+
+# Lutris (game manager)
+lutris
+python-gobject
+python-pillow
+python-requests
+python-yaml
+
+# Heroic Games Launcher deps
+electron
+
+# Filesystem tools (for installer)
+parted
+dosfstools
+ntfs-3g
+exfatprogs
+e2fsprogs
+btrfs-progs
+util-linux
+gparted
+
+# System info & hardware detection
+hwinfo
+pciutils
+usbutils
+dmidecode
+lshw
+htop
+neofetch
+inxi
+cpu-x
+
+# Fonts
+noto-fonts
+noto-fonts-cjk
+noto-fonts-emoji
+ttf-liberation
+ttf-dejavu
+ttf-hack
+
+# Browsers & extras
+firefox
+vlc
+git
+wget
+curl
+nano
+vim
+unzip
+p7zip
+zip
+tar
+rsync
+which
+sudo
+bash-completion
+PKGEOF
+
+            # ── Create all airootfs directories ───────────────────────────
+            mkdir -p \"\${PROFILE_DIR}/airootfs/usr/local/bin\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/usr/share/applications\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/etc/systemd/system\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/etc/sddm.conf.d\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/home/nexora/.config/plasma-workspace/env\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/home/nexora/Desktop\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/etc/nexora\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/usr/share/nexora/wallpapers\"
+            mkdir -p \"\${PROFILE_DIR}/airootfs/usr/share/nexora/sounds\"
+
+            # ── Auto-login: SDDM config ───────────────────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/etc/sddm.conf.d/autologin.conf\" << 'SDDMEOF'
+[Autologin]
+User=nexora
+Session=plasma
+Relogin=true
+SDDMEOF
+
+            # ── Create NEXORA user via customize_airootfs ─────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/root/customize_airootfs.sh\" << 'CUSTEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Create nexora user (password: NEXORA)
+useradd -m -G wheel,audio,video,storage,optical,network,power -s /bin/bash nexora
+echo 'nexora:NEXORA' | chpasswd
+echo 'root:NEXORA' | chpasswd
+
+# Sudoers: no password for wheel
+echo '%wheel ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
+# Enable services
+systemctl enable NetworkManager
+systemctl enable sddm
+systemctl enable waydroid-container
+
+# Waydroid init (deferred to first boot)
+cat > /etc/nexora/waydroid-init.sh << 'WEOF'
+#!/bin/bash
+if [ ! -f /var/lib/waydroid/.initialized ]; then
+  waydroid init -s GAPPS -f
+  touch /var/lib/waydroid/.initialized
+fi
+WEOF
+chmod +x /etc/nexora/waydroid-init.sh
+
+# Locale & timezone defaults
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+locale-gen
+ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+
+echo 'nexora' > /etc/hostname
+CUSTEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/root/customize_airootfs.sh\"
+
+            # ── nexora-sysinfo: System Information Tool ───────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-sysinfo\" << 'SIEOF'
+#!/usr/bin/env bash
+# Nexora System Info + Game Recommender
+# Uses Python + Qt via kdialog or a terminal UI
+
+python3 << 'PYEOF'
+import subprocess, json, os, sys
+
+def run(cmd):
+    try:
+        return subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode().strip()
+    except:
+        return \"Unknown\"
+
+# ── Hardware detection ────────────────────────────────────────────────────
+cpu      = run(\"grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2\").strip()
+cores    = run(\"nproc\")
+ram_kb   = int(run(\"grep MemTotal /proc/meminfo | awk '{print \$2}'\") or 0)
+ram_gb   = round(ram_kb / 1024 / 1024, 1)
+gpu      = run(\"lspci | grep -i 'vga\\|3d\\|display' | cut -d: -f3\").strip()
+disk     = run(\"lsblk -d -o NAME,SIZE,MODEL | grep -v loop | tail -n +2\")
+arch_cpu = run(\"uname -m\")
+kernel   = run(\"uname -r\")
+hostname = run(\"hostname\")
+uptime_s = run(\"uptime -p\")
+board    = run(\"dmidecode -s baseboard-product-name 2>/dev/null || echo 'Unknown'\")
+bios     = run(\"dmidecode -s bios-version 2>/dev/null || echo 'Unknown'\")
+vram     = run(\"lspci -v 2>/dev/null | grep -A 10 'VGA' | grep 'prefetchable' | head -1 | awk '{print \$NF}'\") or \"Unknown\"
+net      = run(\"ip link | grep -E '^[0-9]' | awk '{print \$2}' | tr '\\\\n' ' '\")
+res      = run(\"xrandr 2>/dev/null | grep '*' | awk '{print \$1}' | head -1\") or run(\"wlr-randr 2>/dev/null | grep 'current' | head -1\") or \"Unknown\"
+storage_free = run(\"df -h / | tail -1 | awk '{print \$4}'\")
+storage_total = run(\"df -h / | tail -1 | awk '{print \$2}'\")
+
+info = f\"\"\"
+╔══════════════════════════════════════════════════════════════╗
+║              NEXORA OS — SYSTEM INFORMATION                  ║
+╠══════════════════════════════════════════════════════════════╣
+║  Hostname   : {hostname:<44} ║
+║  Kernel     : {kernel:<44} ║
+║  Uptime     : {uptime_s:<44} ║
+╠══════════════════════════════════════════════════════════════╣
+║  CPU        : {cpu[:44]:<44} ║
+║  CPU Cores  : {cores:<44} ║
+║  RAM        : {str(ram_gb)+' GB':<44} ║
+╠══════════════════════════════════════════════════════════════╣
+║  GPU        : {gpu[:44]:<44} ║
+║  VRAM       : {vram:<44} ║
+║  Resolution : {res:<44} ║
+╠══════════════════════════════════════════════════════════════╣
+║  Motherboard: {board[:44]:<44} ║
+║  BIOS/UEFI  : {bios[:44]:<44} ║
+║  CPU Arch   : {arch_cpu:<44} ║
+╠══════════════════════════════════════════════════════════════╣
+║  Disk Total : {storage_total:<44} ║
+║  Disk Free  : {storage_free:<44} ║
+║  Disks      : {disk[:44]:<44} ║
+║  Network    : {net[:44]:<44} ║
+╚══════════════════════════════════════════════════════════════╝
+\"\"\"
+
+# ── Game tier recommendation based on RAM ────────────────────
+if ram_gb >= 16:
+    tier = \"HIGH-END\"
+    games = [
+        (\"Windows\",  [\"Cyberpunk 2077\",\"Elden Ring\",\"GTA V\",\"Red Dead Redemption 2\",\"Baldur's Gate 3\"]),
+        (\"Linux\",    [\"Dota 2\",\"Counter-Strike 2\",\"Hollow Knight\",\"Celeste\",\"Stardew Valley\"]),
+        (\"Android\",  [\"Genshin Impact\",\"PUBG Mobile\",\"Call of Duty Mobile\",\"Roblox\",\"Minecraft PE\"]),
+    ]
+elif ram_gb >= 8:
+    tier = \"MID-RANGE\"
+    games = [
+        (\"Windows\",  [\"GTA V (Medium)\",\"The Witcher 3\",\"Minecraft\",\"Terraria\",\"Among Us\"]),
+        (\"Linux\",    [\"CS2 (Low)\",\"Stardew Valley\",\"OpenTTD\",\"0 A.D.\",\"SuperTuxKart\"]),
+        (\"Android\",  [\"Clash of Clans\",\"Subway Surfers\",\"Candy Crush\",\"Asphalt 9\",\"Free Fire\"]),
+    ]
+elif ram_gb >= 4:
+    tier = \"LOW-END\"
+    games = [
+        (\"Windows\",  [\"Minecraft (Low)\",\"Among Us\",\"Terraria\",\"Undertale\",\"Stardew Valley\"]),
+        (\"Linux\",    [\"SuperTuxKart\",\"0 A.D.\",\"FreeCiv\",\"Xonotic\",\"Minetest\"]),
+        (\"Android\",  [\"Subway Surfers\",\"Candy Crush\",\"Temple Run\",\"Hill Climb Racing\",\"Angry Birds\"]),
+    ]
+else:
+    tier = \"MINIMUM\"
+    games = [
+        (\"Linux\",    [\"Minetest\",\"FreeCiv\",\"2048\",\"Xonotic (Low)\",\"Supertux\"]),
+        (\"Android\",  [\"2048\",\"Solitaire\",\"Snake\",\"Sudoku\",\"Chess\"]),
+    ]
+
+game_str = f\"\\n  System Tier: {tier}\\n\"
+for platform, glist in games:
+    game_str += f\"\\n  [{platform} Games]\\n\"
+    for g in glist:
+        game_str += f\"    ✦ {g}\\n\"
+
+print(info)
+print(\"╔══════════════════════════════════════════════════════════════╗\")
+print(\"║           RECOMMENDED GAMES FOR YOUR SYSTEM                  ║\")
+print(\"╚══════════════════════════════════════════════════════════════╝\")
+print(game_str)
+print(\"  Filter options: nexora-sysinfo --windows | --android | --linux\")
+PYEOF
+SIEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-sysinfo\"
+
+            # ── nexora-exe-handler: Run .exe files ────────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-exe-handler\" << 'EXEEOF'
+#!/usr/bin/env bash
+TARGET=\"\$1\"
+if [ -z \"\$TARGET\" ]; then
+  echo \"Usage: nexora-exe-handler <file.exe>\"
+  exit 1
+fi
+export WINEPREFIX=\"\${HOME}/.wine-nexora\"
+export WINEARCH=\"win64\"
+export DXVK_HUD=0
+wine \"\$TARGET\"
+EXEEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-exe-handler\"
+
+            # ── nexora-gamelauncher: Game Launcher ───────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-gamelauncher\" << 'GLEOF'
+#!/usr/bin/env bash
+konsole -e bash -c '
+echo \"\"
+echo \"  ███╗   ██╗███████╗██╗  ██╗ ██████╗ ██████╗  █████╗ \"
+echo \"  ████╗  ██║██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██╔══██╗\"
+echo \"  ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║██████╔╝███████║\"
+echo \"  ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║██╔══██╗██╔══██║\"
+echo \"  ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝██║  ██║██║  ██║\"
+echo \"  ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝\"
+echo \"\"
+echo \"  ════════════ NEXORA GAME LAUNCHER ════════════\"
+echo \"  [1] Steam (Linux + Windows via Proton)\"
+echo \"  [2] Lutris (All platforms)\"
+echo \"  [3] Heroic Games Launcher (Epic + GOG)\"
+echo \"  [4] Waydroid (Android Games)\"
+echo \"  [5] Run a .exe file manually\"
+echo \"  [6] System Info + Game Recommendations\"
+echo \"  [0] Exit\"
+echo \"  ════════════════════════════════════════════\"
+read -p \"  Choose: \" CH
+case \$CH in
+  1) steam ;;
+  2) lutris ;;
+  3) heroic ;;
+  4) waydroid show-full-ui ;;
+  5) read -p \"  Path to .exe: \" EXE; nexora-exe-handler \"\$EXE\" ;;
+  6) nexora-sysinfo ;;
+  0) exit ;;
+  *) echo \"Invalid\"; sleep 1 ;;
+esac
+read -p \"Press Enter to continue...\"
+'
+GLEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-gamelauncher\"
+
+            # ── nexora-store: Unified App Store ───────────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-store\" << 'STEOF'
+#!/usr/bin/env bash
+konsole -e bash -c '
+while true; do
+echo \"\"
+echo \"  ══════════════════════════════════════════\"
+echo \"         NEXORA UNIFIED STORE               \"
+echo \"  ══════════════════════════════════════════\"
+echo \"  [1] Discover (KDE - Linux apps/Flatpak)   \"
+echo \"  [2] Steam Store (PC Games)                \"
+echo \"  [3] Heroic (Epic Games + GOG)             \"
+echo \"  [4] Itch.io Store (Indie Games)           \"
+echo \"  [5] APKPure (Android APKs via Waydroid)   \"
+echo \"  [6] AUR / Pacman (Arch Linux packages)    \"
+echo \"  [7] Flathub (Flatpak apps)                \"
+echo \"  [0] Exit                                  \"
+echo \"  ══════════════════════════════════════════\"
+read -p \"  Choose a store: \" S
+case \$S in
+  1) plasma-discover ;;
+  2) steam steam://store ;;
+  3) heroic ;;
+  4) xdg-open https://itch.io ;;
+  5) xdg-open https://apkpure.com ;;
+  6) read -p \"  Package name: \" PKG; konsole -e sudo pacman -S \$PKG ;;
+  7) xdg-open https://flathub.org ;;
+  0) break ;;
+  *) echo \"Invalid\"; sleep 1 ;;
+esac
+done
+'
+STEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-store\"
+
+            # ── nexora-installer: OS Installer ────────────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-installer\" << 'INSTEOF'
+#!/usr/bin/env bash
+# Nexora OS Installer - Supports ext4, btrfs, exFAT, FAT32, NTFS
+
+konsole -e bash << 'INNER'
+set -euo pipefail
+
+echo \"\"
+echo \"  ╔══════════════════════════════════════════════════════╗\"
+echo \"  ║          NEXORA OS INSTALLER v1.0                    ║\"
+echo \"  ║  Minimum: 1GB RAM, 5GB Storage, 64-bit, 1024x768     ║\"
+echo \"  ║  Recommended: 2GB RAM, 15GB Storage                  ║\"
+echo \"  ╚══════════════════════════════════════════════════════╝\"
+echo \"\"
+
+# List disks
+echo \"  Available disks:\"
+lsblk -d -o NAME,SIZE,MODEL | grep -v loop
+echo \"\"
+read -p \"  Enter target disk (e.g. sda, nvme0n1): \" DISK
+DISK=\"/dev/\${DISK}\"
+
+echo \"\"
+echo \"  Choose filesystem:\"
+echo \"  [1] ext4    (Recommended - best Linux support)\"
+echo \"  [2] btrfs   (Modern - snapshots, compression)\"
+echo \"  [3] exFAT   (Compatible with Windows/Mac)\"
+echo \"  [4] FAT32   (Maximum compatibility)\"
+echo \"  [5] NTFS    (Windows compatible)\"
+read -p \"  Choice: \" FSTYPE
+
+case \$FSTYPE in
+  1) FS=\"ext4\" ;;
+  2) FS=\"btrfs\" ;;
+  3) FS=\"exfat\" ;;
+  4) FS=\"vfat\" ;;
+  5) FS=\"ntfs\" ;;
+  *) echo \"Invalid\"; exit 1 ;;
+esac
+
+echo \"\"
+echo \"  ⚠  WARNING: This will ERASE all data on \${DISK}\"
+read -p \"  Type YES to confirm: \" CONFIRM
+[ \"\$CONFIRM\" != \"YES\" ] && echo \"Cancelled.\" && exit 0
+
+echo \"  Partitioning \${DISK}...\"
+parted -s \"\$DISK\" mklabel gpt
+parted -s \"\$DISK\" mkpart ESP fat32 1MiB 512MiB
+parted -s \"\$DISK\" set 1 esp on
+parted -s \"\$DISK\" mkpart ROOT \"\$FS\" 512MiB 100%
+
+# Format
+EFI_PART=\"\${DISK}1\"
+ROOT_PART=\"\${DISK}2\"
+
+mkfs.fat -F32 \"\$EFI_PART\"
+
+case \$FS in
+  ext4)  mkfs.ext4 -L NEXORA \"\$ROOT_PART\" ;;
+  btrfs) mkfs.btrfs -L NEXORA \"\$ROOT_PART\" ;;
+  exfat) mkfs.exfat -n NEXORA \"\$ROOT_PART\" ;;
+  vfat)  mkfs.fat -F32 -n NEXORA \"\$ROOT_PART\" ;;
+  ntfs)  mkfs.ntfs -Q -L NEXORA \"\$ROOT_PART\" ;;
+esac
+
+echo \"  Mounting...\"
+mount \"\$ROOT_PART\" /mnt
+mkdir -p /mnt/boot/efi
+mount \"\$EFI_PART\" /mnt/boot/efi
+
+echo \"  Copying system files (this may take 10-20 minutes)...\"
+rsync -aAX --exclude={'/dev/*','/proc/*','/sys/*','/tmp/*','/run/*','/mnt/*','/lost+found'} / /mnt/
+
+echo \"  Installing bootloader...\"
+arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=NEXORA
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+echo \"  Finalizing...\"
+arch-chroot /mnt mkinitcpio -P
+umount -R /mnt
+
+echo \"\"
+echo \"  ✓ Nexora OS installed successfully!\"
+echo \"  ✓ Remove the USB and reboot.\"
+read -p \"  Press Enter to exit...\"
+INNER
+INSTEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/usr/local/bin/nexora-installer\"
+
+            # ── Desktop .desktop shortcuts ────────────────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/applications/nexora-gamelauncher.desktop\" << 'DEOF'
+[Desktop Entry]
+Type=Application
+Name=Nexora Game Launcher
+Comment=Launch Windows, Linux and Android games
+Exec=nexora-gamelauncher
+Icon=applications-games
+Categories=Game;
+DEOF
+
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/applications/nexora-store.desktop\" << 'DEOF'
+[Desktop Entry]
+Type=Application
+Name=Nexora Store
+Comment=Unified store for all platforms
+Exec=nexora-store
+Icon=system-software-install
+Categories=System;
+DEOF
+
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/applications/nexora-sysinfo.desktop\" << 'DEOF'
+[Desktop Entry]
+Type=Application
+Name=Nexora System Info
+Comment=View hardware info and game recommendations
+Exec=konsole -e nexora-sysinfo
+Icon=hwinfo
+Categories=System;
+DEOF
+
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/applications/nexora-installer.desktop\" << 'DEOF'
+[Desktop Entry]
+Type=Application
+Name=Install Nexora OS
+Comment=Install Nexora OS to your drive
+Exec=nexora-installer
+Icon=drive-harddisk
+Categories=System;
+DEOF
+
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/applications/nexora-windows.desktop\" << 'DEOF'
+[Desktop Entry]
+Type=Application
+Name=Run Windows App
+Comment=Run a .exe file with Wine
+Exec=/usr/local/bin/nexora-exe-handler %f
+MimeType=application/x-ms-dos-executable;application/x-msi;application/x-exe;
+NoDisplay=false
+Icon=wine
+Categories=System;
+DEOF
+
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/applications/nexora-android.desktop\" << 'DEOF'
+[Desktop Entry]
+Type=Application
+Name=Nexora Android
+Comment=Run Android apps and games via Waydroid
+Exec=waydroid show-full-ui
+Icon=waydroid
+Categories=System;Game;
+DEOF
+
+            # ── AE86 Wallpaper (SVG placeholder) ─────────────────────────
+            cat > \"\${PROFILE_DIR}/airootfs/usr/share/nexora/wallpapers/nexora-default.svg\" << 'SVGEOF'
+<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'>
+  <defs>
+    <radialGradient id='bg' cx='50%' cy='60%' r='80%'>
+      <stop offset='0%' stop-color='#1a1a2e'/>
+      <stop offset='50%' stop-color='#0d0d1a'/>
+      <stop offset='100%' stop-color='#000000'/>
+    </radialGradient>
+  </defs>
+  <rect width='1920' height='1080' fill='url(#bg)'/>
+  <text x='960' y='200' font-family='monospace' font-size='80' fill='#ffffff'
+    text-anchor='middle' opacity='0.08'>NEXORA OS</text>
+  <text x='960' y='540' font-family='monospace' font-size='36' fill='#4fc3f7'
+    text-anchor='middle' opacity='0.6'>NEXORA OS</text>
+  <text x='960' y='600' font-family='monospace' font-size='16' fill='#90caf9'
+    text-anchor='middle' opacity='0.4'>Gaming. Unified. Free.</text>
+</svg>
+SVGEOF
+
+            # ── Plasma autostart: set wallpaper on first login ────────────
+            mkdir -p \"\${PROFILE_DIR}/airootfs/home/nexora/.config/autostart\"
+            cat > \"\${PROFILE_DIR}/airootfs/home/nexora/.config/autostart/nexora-setup.desktop\" << 'ASEOF'
+[Desktop Entry]
+Type=Application
+Name=Nexora First Boot Setup
+Exec=/etc/nexora/first-boot.sh
+X-KDE-autostart-after=panel
+ASEOF
+
+            mkdir -p \"\${PROFILE_DIR}/airootfs/etc/nexora\"
+            cat > \"\${PROFILE_DIR}/airootfs/etc/nexora/first-boot.sh\" << 'FBEOF'
+#!/bin/bash
+# Set AE86 wallpaper
+plasma-apply-wallpaperimage /usr/share/nexora/wallpapers/nexora-default.svg 2>/dev/null || true
+# Init Waydroid if not done
+/etc/nexora/waydroid-init.sh &
+# Show welcome
+kdialog --title \"Welcome to Nexora OS\" --msgbox \"Welcome to Nexora OS!
+
+Your system is ready. Use the desktop shortcuts to:
+ Game Launcher — Play Windows, Linux & Android games
+ Nexora Store  — Install apps from all platforms
+ System Info   — See your hardware & game recommendations
+ Install Nexora — Install to your drive
+
+Auto-login is set. Username: NEXORA | Password: NEXORA\" 2>/dev/null || true
+# Remove autostart after first run
+rm -f ~/.config/autostart/nexora-setup.desktop
+FBEOF
+            chmod +x \"\${PROFILE_DIR}/airootfs/etc/nexora/first-boot.sh\"
+
+            # ── Build the ISO ─────────────────────────────────────────────
+            mkarchiso -v -w \"\${BUILD_DIR}/work\" -o \"\${OUT_DIR}\" \"\${PROFILE_DIR}\"
+          "
+
+      # ── 5. Upload ISO as artifact ─────────────────────────────────────────
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexora-os-iso
+          path: output/nexora-os-*.iso
+          retention-days: 7
+          compression-level: 9
